@@ -152,29 +152,27 @@ class _DeadProc:
 
 
 @pytest.mark.asyncio
-async def test_unexpected_sidecar_exit_raises_retryable_fatal(
+async def test_unexpected_sidecar_exit_restarts_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _make_adapter(monkeypatch)
+    proc = _DeadProc(exit_code=137)
     # Simulate a live session whose sidecar then dies underneath it.
     adapter._inbound_running = True
+    adapter._sidecar_proc = proc  # type: ignore[assignment]
 
-    notified: list[bool] = []
+    restarted: list[str] = []
 
-    async def _fake_notify() -> None:
-        notified.append(True)
+    async def _fake_restart(reason: str) -> None:
+        restarted.append(reason)
 
-    monkeypatch.setattr(adapter, "_notify_fatal_error", _fake_notify)
+    monkeypatch.setattr(adapter, "_restart_sidecar_after_failure", _fake_restart)
 
-    await adapter._supervise_sidecar(_DeadProc(exit_code=137))  # type: ignore[arg-type]
+    await adapter._supervise_sidecar(proc)  # type: ignore[arg-type]
 
-    assert adapter.has_fatal_error is True
-    assert adapter.fatal_error_code == "SIDECAR_CRASHED"
-    # retryable=True routes the platform into the reconnect watcher rather
-    # than crashing the whole gateway.
-    assert adapter.fatal_error_retryable is True
-    assert adapter._running is False
-    assert notified == [True]
+    assert adapter.has_fatal_error is False
+    assert adapter._sidecar_proc is None
+    assert restarted == ["unexpected sidecar exit (code 137)"]
 
 
 @pytest.mark.asyncio

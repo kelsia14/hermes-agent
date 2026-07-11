@@ -67,6 +67,19 @@ async def test_dispatch_text_dm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_drops_placeholder_only_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """iMessage object-replacement placeholders are not real user turns."""
+    adapter = _make_adapter(monkeypatch)
+    captured = _capture(adapter, monkeypatch)
+
+    await adapter._dispatch_inbound(_dm_event("\ufffc", msg_id="placeholder"))
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
 async def test_dispatch_group_type(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _make_adapter(monkeypatch)
     captured = _capture(adapter, monkeypatch)
@@ -354,6 +367,57 @@ def test_is_duplicate_hard_size_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(adapter._seen_messages) <= 5
     assert adapter._is_duplicate("id-99") is True  # recent still deduped
     assert adapter._is_duplicate("id-0") is False  # oldest evicted
+
+
+def test_sidecar_stream_warning_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    import plugins.platforms.photon.adapter as ad
+
+    monkeypatch.setattr(ad, "_SIDECAR_STREAM_RESET_THRESHOLD", 4)
+    monkeypatch.setattr(ad, "_SIDECAR_STREAM_RESET_WINDOW_SECONDS", 120.0)
+    adapter = _make_adapter(monkeypatch)
+    line = "[spectrum.stream] WARN stream interrupted; reconnecting"
+
+    assert adapter._record_sidecar_stream_warning(line, now=1000.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1010.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1020.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1030.0) is True
+
+
+def test_sidecar_stream_warning_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    import plugins.platforms.photon.adapter as ad
+
+    monkeypatch.setattr(ad, "_SIDECAR_STREAM_RESET_THRESHOLD", 4)
+    monkeypatch.setattr(ad, "_SIDECAR_STREAM_RESET_WINDOW_SECONDS", 30.0)
+    adapter = _make_adapter(monkeypatch)
+    line = "[spectrum.stream] ERROR stream persistently failing ConnectionError"
+
+    assert adapter._record_sidecar_stream_warning(line, now=1000.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1010.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1020.0) is False
+    # The first warning has aged out, so this is only three within the window.
+    assert adapter._record_sidecar_stream_warning(line, now=1031.0) is False
+
+
+def test_sidecar_stream_warning_matches_rst_stream_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import plugins.platforms.photon.adapter as ad
+
+    monkeypatch.setattr(ad, "_SIDECAR_STREAM_RESET_THRESHOLD", 2)
+    adapter = _make_adapter(monkeypatch)
+    line = (
+        "/photon.imessage.v1.MessageService/SubscribeMessageEvents INTERNAL: "
+        "Received RST_STREAM with code 2 (Internal server error)"
+    )
+
+    assert adapter._record_sidecar_stream_warning(line, now=1000.0) is False
+    assert adapter._record_sidecar_stream_warning(line, now=1001.0) is True
+
+
+def test_sidecar_stream_warning_ignores_unrelated_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _make_adapter(monkeypatch)
+    assert adapter._record_sidecar_stream_warning("ordinary sidecar log", now=1000.0) is False
+    assert list(adapter._sidecar_stream_warning_times) == []
 
 
 def test_check_requirements_without_node(monkeypatch: pytest.MonkeyPatch) -> None:
